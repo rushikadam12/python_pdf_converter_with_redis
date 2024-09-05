@@ -150,7 +150,7 @@ def convert_xlsx():
                 print(f"Writing value: {row_text} (type: {type(value)})")
                 pdf.cell(columns_widths[i], 10, txt=row_text, border=1, align="c")
             pdf.ln()
-            
+
         # save the pdf buffer to memory
         pdf_Buffer = io.BytesIO()
         pdf.output(pdf_Buffer)
@@ -178,5 +178,15 @@ def convert_xlsx():
         else:
             return "something went wrong"
 
+    except Exception as e:
+        return str(e)
+
+@main_dp.route("/ppt_to_pdf",methods=["POST"])
+def convert_ppt_to_pdf():
+
+    try:
+        file_hash=request.cookies.get('file_id')
+        print(file_hash)
+        return ""
     except Exception as e:
         return str(e)
