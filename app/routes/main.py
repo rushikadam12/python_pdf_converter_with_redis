@@ -8,6 +8,7 @@ from flask import (
     send_file,
 )
 from fpdf import FPDF
+import pdfkit
 import uuid
 import os
 from dotenv import load_dotenv
@@ -19,6 +20,11 @@ import json
 import base64
 import io
 import zipfile
+from pyhtml2pdf import converter
+
+from app.controller.converter import Ppt_To_Pdf
+
+# from app.controller.html_converter import html_converter
 
 main_dp = Blueprint("main_dp", __name__)
 load_dotenv()
@@ -40,7 +46,7 @@ def compute_has_for_file(file_stream):
 
 
 def cache_file(cache_key, file_name, file_bytes):
-    print(file_bytes)
+    # print(file_bytes)
     redis_client.hset(
         cache_key,
         mapping={
@@ -68,12 +74,17 @@ def file_upload():
         hash_values = redis_client.hgetall(file_hash)
         # print(hash_values)
         file_name = hash_values[b"file_name"].decode("utf-8")
-        file_bytes = base64.b64encode(hash_values[b"file_bytes"]).decode("utf-8")
+        try:
+            file_bytes = base64.b64decode(hash_values[b"file_bytes"]).decode("utf-8")
+        except UnicodeDecodeError:
+            file_bytes = base64.b64decode(hash_values[b"file_bytes"])
+            file_bytes_string = str(file_bytes)
+
         response = make_response(
             {
                 "file_hash": file_hash,
                 "file_name": file_name,
-                "file_bytes": file_bytes,
+                "file_bytes": f"{file_bytes_string[:13]}...",
                 "message": "cache file",
             }
         )
@@ -99,7 +110,7 @@ def convert_xlsx():
         if file_hash is None:
             return jsonify({"message": "file not found pls check the file"})
 
-        cache_file = redis_client.hget(file_hash,"converted_file")
+        cache_file = redis_client.hget(file_hash, "converted_file")
         # check for cache and return the cache file
         if cache_file:
             cache_response = Response(cache_file, content_type="application/pdf")
@@ -110,7 +121,7 @@ def convert_xlsx():
 
         file_data = redis_client.hgetall(file_hash)
         file_name = file_data[b"file_name"].decode("utf-8")
-        file_split_name,file_extension = os.path.splitext(file_name)
+        file_split_name, file_extension = os.path.splitext(file_name)
         file_bytes = base64.b64decode(file_data[b"file_bytes"])
         file_like = io.BytesIO(file_bytes)
 
@@ -181,12 +192,136 @@ def convert_xlsx():
     except Exception as e:
         return str(e)
 
-@main_dp.route("/ppt_to_pdf",methods=["POST"])
+
+@main_dp.route("/ppt_to_pdf", methods=["POST"])
 def convert_ppt_to_pdf():
 
     try:
-        file_hash=request.cookies.get('file_id')
-        print(file_hash)
-        return ""
+        file_hash = request.cookies.get("file_id")
+        cache_file = redis_client.hgetall(file_hash)
+
+        if not cache_file:
+            return "file is not uploaded correctly"
+
+        file_name = cache_file[b"file_name"].decode("utf-8")
+        file_bytes = base64.b64decode(cache_file[b"file_bytes"])
+
+        # check for cache and return the cache file
+        cache_file = redis_client.hget(file_hash, "converted_file")
+        if cache_file:
+            response = Response(cache_file, content_type="application/pdf")
+            response.headers["Content-Disposition"] = (
+                'attachment;filename="converted_file.pdf"'
+            )
+            return response
+
+        file_id = uuid.uuid4()
+        saved_file_result = Save_file(
+            file_bytes, file_name, file_id
+        )  # save the file to the server storage
+
+        result = Ppt_To_Pdf(saved_file_result, file_id)  # PPT TO --> PDF
+
+        cache_result = Save_Cache(result, file_hash)  # save file in cache
+
+        return cache_result
+    except Exception as e:
+        return str(e)
+
+
+def Save_file(file_bytes, file_name, id):
+    try:
+        fName, extension = os.path.splitext(file_name)
+        if not file_bytes:
+            return "pls check the function params named file_bytes"
+
+        # create the file here
+        file_name = str(id) + fName + extension
+        file_path = os.path.join(os.environ.get("STORAGE_PATH"), file_name)
+        print(file_path)
+
+        # bytes conversion
+        file_stream = io.BytesIO(file_bytes)
+        file_data = file_stream.read()
+
+        with open(file_path, "wb") as f:
+            f.write(file_data)
+        return file_path
+
+    except Exception as e:
+        return str(e)
+
+
+def Save_Cache(file_name, file_hash):
+    try:
+        file_path = os.path.join(os.environ.get("STORAGE_PATH"), file_name)
+        with open(file_path, "rb") as f:
+            content = f.read()
+        if not content:
+            return "file not found"
+        redis_client.hset(file_hash, "converted_file", content)
+
+        # clean the storage file once complete the conversion
+        list_dir = os.listdir(os.environ.get("STORAGE_PATH"))
+        for dir in list_dir:
+            rm_file = os.path.join(os.environ.get("STORAGE_PATH"), dir)
+            try:
+                if os.path.isfile(rm_file):
+                    os.remove(rm_file)
+            except Exception as e:
+                print(str(e))
+                return str(e)
+        response = Response(content, content_type="application/pdf")
+        response.headers["Content-Disposition"] = (
+            'attachment;filename="converted_file.pdf"'
+        )
+        return response
+
+    except Exception as e:
+        return str(e)
+
+
+@main_dp.route("/html_to_pdf", methods=["POST"])
+def html_to_pdf():
+    try:
+        file_hash = request.cookies.get("file_id")
+        if file_hash is None:
+            return "uploaded file not found"
+
+        file_data = redis_client.hgetall(file_hash)
+        file_name = file_data[b"file_name"].decode("utf-8")
+        file_bytes = base64.b64decode(file_data[b"file_bytes"])
+        # file_bytes = redis_client.hget(file_hash, "file_bytes")
+        # print(file_bytes)
+
+        # conversion
+        # with io.BytesIO(file_binary) as file:
+        #     content=file.read()
+        #     html_pdf_buffer=pdfkit.from_file(file,False)
+        #     print(html_pdf_buffer)
+        try:
+            result = html_converter(file_bytes)
+        except Exception as e:
+            return str(e)
+
+        response = Response(result, content_type="application/pdf")
+        response.headers["Content-Disposition"] = (
+            'attachment;filename="converted_file.pdf"'
+        )
+        return response
+
+    except Exception as e:
+        return str(e)
+
+
+def html_converter(file_bytes):
+    try:
+        # print(file_binary)
+        converter.convert(file_bytes)#check for new module 
+        pdf_content = pdf.convert(file_bytes)
+        # print(pdf_content)
+
+        return pdf_content
+
     except Exception as e:
         return str(e)
