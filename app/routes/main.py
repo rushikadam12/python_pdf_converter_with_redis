@@ -20,8 +20,8 @@ import json
 import base64
 import io
 import zipfile
-from pyhtml2pdf import converter
-
+from xhtml2pdf import pisa
+from weasyprint import HTML
 from app.controller.converter import Ppt_To_Pdf
 
 # from app.controller.html_converter import html_converter
@@ -78,13 +78,14 @@ def file_upload():
             file_bytes = base64.b64decode(hash_values[b"file_bytes"]).decode("utf-8")
         except UnicodeDecodeError:
             file_bytes = base64.b64decode(hash_values[b"file_bytes"])
-            file_bytes_string = str(file_bytes)
+            if ".html" in file_name:
+                file_bytes_string = str(file_bytes)
 
         response = make_response(
             {
                 "file_hash": file_hash,
                 "file_name": file_name,
-                "file_bytes": f"{file_bytes_string[:13]}...",
+                "file_bytes": file_bytes,
                 "message": "cache file",
             }
         )
@@ -288,27 +289,34 @@ def html_to_pdf():
         if file_hash is None:
             return "uploaded file not found"
 
+        #redis_cache
         file_data = redis_client.hgetall(file_hash)
-        file_name = file_data[b"file_name"].decode("utf-8")
-        file_bytes = base64.b64decode(file_data[b"file_bytes"])
-        # file_bytes = redis_client.hget(file_hash, "file_bytes")
-        # print(file_bytes)
+        file_name = file_data[b"file_name"].decode('utf-8')
+        file_bytes = base64.b64decode(file_data[b"file_bytes"]).decode('utf-8')
 
-        # conversion
-        # with io.BytesIO(file_binary) as file:
-        #     content=file.read()
-        #     html_pdf_buffer=pdfkit.from_file(file,False)
-        #     print(html_pdf_buffer)
+        # cache file (pdf file already present so here we will directly return it)
+        converted_file=redis_client.hget(file_hash,"converted_file")
+        if converted_file:
+            response = Response(converted_file, content_type="application/pdf")
+            response.headers["Content-Disposition"] = ('attachment;filename="converted_file.pdf"')
+            return response
+
+        #start conversion
         try:
             result = html_converter(file_bytes)
         except Exception as e:
             return str(e)
 
+        #cache
+        redis_client.hset(file_hash,"converted_file",result)
+
+        #create the response here
         response = Response(result, content_type="application/pdf")
         response.headers["Content-Disposition"] = (
             'attachment;filename="converted_file.pdf"'
         )
         return response
+        # return result
 
     except Exception as e:
         return str(e)
@@ -316,12 +324,29 @@ def html_to_pdf():
 
 def html_converter(file_bytes):
     try:
-        # print(file_binary)
-        converter.convert(file_bytes)#check for new module 
-        pdf_content = pdf.convert(file_bytes)
-        # print(pdf_content)
+        
+        file_path = os.path.join(os.environ.get("STORAGE_PATH"), "converted_file.pdf")
 
-        return pdf_content
+        #file_conversion
+        HTML(string=str(file_bytes)).write_pdf(file_path)
 
+        # read the binary of the pdf file which saved in directory
+        with open(file_path,'rb')as file:
+            file_binary=file.read()
+        
+        list_dir=os.listdir(os.environ.get("STORAGE_PATH"))
+        for dir in list_dir:
+            print(dir)
+            rm_file=os.path.join(os.environ.get("STORAGE_PATH"),dir)
+            try:
+                if os.path.isfile(rm_file):
+                    os.remove(rm_file)
+                
+            except Exception as e:
+                return str(e)
+
+        return file_binary
+
+        
     except Exception as e:
         return str(e)

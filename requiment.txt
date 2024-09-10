@@ -1,0 +1,1 @@
+pip install Flask fpdf pdfkit pandas matplotlib redis xhtml2pdf python-dotenv
