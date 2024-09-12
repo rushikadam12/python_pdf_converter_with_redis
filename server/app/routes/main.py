@@ -7,6 +7,7 @@ from flask import (
     make_response,
     send_file,
 )
+from functools import wraps
 from fpdf import FPDF
 import pdfkit
 import uuid
@@ -19,6 +20,7 @@ from app import redis_client
 import json
 import base64
 import io
+import subprocess
 import zipfile
 from xhtml2pdf import pisa
 from weasyprint import HTML
@@ -83,9 +85,9 @@ def file_upload():
 
         response = make_response(
             {
-                "file_hash": file_hash,
-                "file_name": file_name,
-                "file_bytes": file_bytes,
+                "file_hash": str(file_hash),
+                "file_name": str(file_name),
+                "file_bytes": str(file_bytes)[:15],
                 "message": "cache file",
             }
         )
@@ -289,28 +291,30 @@ def html_to_pdf():
         if file_hash is None:
             return "uploaded file not found"
 
-        #redis_cache
+        # redis_cache
         file_data = redis_client.hgetall(file_hash)
-        file_name = file_data[b"file_name"].decode('utf-8')
-        file_bytes = base64.b64decode(file_data[b"file_bytes"]).decode('utf-8')
+        file_name = file_data[b"file_name"].decode("utf-8")
+        file_bytes = base64.b64decode(file_data[b"file_bytes"]).decode("utf-8")
 
         # cache file (pdf file already present so here we will directly return it)
-        converted_file=redis_client.hget(file_hash,"converted_file")
+        converted_file = redis_client.hget(file_hash, "converted_file")
         if converted_file:
             response = Response(converted_file, content_type="application/pdf")
-            response.headers["Content-Disposition"] = ('attachment;filename="converted_file.pdf"')
+            response.headers["Content-Disposition"] = (
+                'attachment;filename="converted_file.pdf"'
+            )
             return response
 
-        #start conversion
+        # start conversion
         try:
             result = html_converter(file_bytes)
         except Exception as e:
             return str(e)
 
-        #cache
-        redis_client.hset(file_hash,"converted_file",result)
+        # cache
+        redis_client.hset(file_hash, "converted_file", result)
 
-        #create the response here
+        # create the response here
         response = Response(result, content_type="application/pdf")
         response.headers["Content-Disposition"] = (
             'attachment;filename="converted_file.pdf"'
@@ -324,29 +328,98 @@ def html_to_pdf():
 
 def html_converter(file_bytes):
     try:
-        
+
         file_path = os.path.join(os.environ.get("STORAGE_PATH"), "converted_file.pdf")
 
-        #file_conversion
+        # file_conversion
         HTML(string=str(file_bytes)).write_pdf(file_path)
 
         # read the binary of the pdf file which saved in directory
-        with open(file_path,'rb')as file:
-            file_binary=file.read()
-        
-        list_dir=os.listdir(os.environ.get("STORAGE_PATH"))
+        with open(file_path, "rb") as file:
+            file_binary = file.read()
+
+        list_dir = os.listdir(os.environ.get("STORAGE_PATH"))
         for dir in list_dir:
             print(dir)
-            rm_file=os.path.join(os.environ.get("STORAGE_PATH"),dir)
+            rm_file = os.path.join(os.environ.get("STORAGE_PATH"), dir)
             try:
                 if os.path.isfile(rm_file):
                     os.remove(rm_file)
-                
+
             except Exception as e:
                 return str(e)
 
         return file_binary
 
-        
     except Exception as e:
         return str(e)
+
+
+# decorate to check for cookies
+def Cookies_check(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        file_hash = request.cookies.get("file_id")
+
+        if file_hash is None:
+            return {"message": "Cookies not Found"}
+
+        return func(file_hash, *args, **kwargs)
+
+    return wrapper
+
+
+def save_to_storage(file_binary):
+    file_path = os.path.join(os.environ.get("STORAGE_PATH"), "Userfile.docx")
+    try:
+        with open(file_path, "wb") as file:
+            file.write(file_binary)
+
+        return file_path
+
+    except Exception as e:
+        return str(e)
+
+
+@main_dp.route("/docx_to_pdf", methods=["POST"])
+@Cookies_check
+def docx_to_pdf(file_hash):
+    try:
+        file_data = redis_client.hgetall(file_hash)
+        file_name = file_data[b"file_name"].decode("utf-8")
+        file_binary = base64.b64decode(file_data[b"file_bytes"])
+
+        cache_file=redis_client.hget(file_hash,"converted_file")
+        # print(cache_file)
+
+        if cache_file:
+            response = Response(cache_file, content_type="application/pdf")
+            response.headers["Content-Disposition"] = (
+            'attachment;filename="converted_file.pdf"'
+            )
+            return response
+
+            user_file = save_to_storage(file_binary)
+            output_path = os.environ.get("STORAGE_PATH")
+            subprocess.run(
+                [
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    user_file,
+                    "--outdir",
+                    output_path,
+                ],
+                check=True,
+            )
+
+            file_path = os.path.join(os.environ.get("STORAGE_PATH"),"Userfile.pdf")
+
+            result = Save_Cache(file_path,file_hash)
+
+            return result
+
+    except Exception as e:
+        return str(e)
+
