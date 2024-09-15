@@ -25,19 +25,27 @@ import zipfile
 from xhtml2pdf import pisa
 from weasyprint import HTML
 from app.controller.converter import Ppt_To_Pdf
+from datetime import datetime, timedelta
+from flask_cors import CORS
 
 # from app.controller.html_converter import html_converter
+
 
 main_dp = Blueprint("main_dp", __name__)
 load_dotenv()
 
 
-@main_dp.route("/")
-def index():
-    return ""
+# @main_dp.before_request
+# def make_session_permanent():
+#     session.permanent = True
 
 
-def compute_has_for_file(file_stream):
+# @main_dp.route("/")
+# def index():
+#     return ""
+
+
+def compute_hash_for_file(file_stream):
     hash_algo = hashlib.sha256()
 
     for chunk in iter(lambda: file_stream.read(4096), b""):
@@ -65,11 +73,13 @@ def cache_file(cache_key, file_name, file_bytes):
 def file_upload():
     if "user_id" not in session:
         session["user_id"] = str(uuid.uuid4())
-
+    print(request.files)
     userId = session["user_id"]
     User_file = request.files["file"]
+    if User_file is None:
+        return "No file part", 400
 
-    file_hash = compute_has_for_file(User_file.stream)
+    file_hash = compute_hash_for_file(User_file.stream)
     User_file.seek(0)
     # check if the file exist in redis
     if redis_client.exists(file_hash):
@@ -83,23 +93,43 @@ def file_upload():
             if ".html" in file_name:
                 file_bytes_string = str(file_bytes)
 
-        response = make_response(
-            {
-                "file_hash": str(file_hash),
-                "file_name": str(file_name),
-                "file_bytes": str(file_bytes)[:15],
-                "message": "cache file",
-            }
-        )
+            response = make_response(
+                {
+                    # "file_hash": str(file_hash),
+                    # "file_name": str(file_name),
+                    # "file_bytes": str(file_bytes)[:15],
+                    "message": "cache file",
+                }
+            )
 
-        return response
+            response.set_cookie(
+                "file_id",
+                file_hash,
+                httponly=True,
+                secure=True,
+                samesite="Lax",
+                expires=datetime.utcnow() + timedelta(days=1),
+                path="/"
+            )
+            # response.headers.add(
+            #     "Set-Cookie",
+            #     f"refreshToken={file_hash}; HttpOnly=True; SameSite=None; Secure=True; Path=/; Partitioned=False;",
+            # )
+            return response
 
     file_bytes = User_file.read()  # convert into bytes
     cache_key = cache_file(file_hash, User_file.filename, file_bytes)
     print(cache_key)
     response = make_response({"message": "file new file found"})
-    response.set_cookie("file_id", file_hash, httponly=True, secure=True)
-    return response
+    response.set_cookie(
+        "file_id",
+        file_hash,
+        httponly=True,
+        secure=True,
+        samesite="None",
+        expires=datetime.utcnow() + timedelta(days=1),
+    )
+    # return response, 200
 
 
 @main_dp.route("/convert_xlsx_to_pdf")
@@ -389,37 +419,36 @@ def docx_to_pdf(file_hash):
         file_name = file_data[b"file_name"].decode("utf-8")
         file_binary = base64.b64decode(file_data[b"file_bytes"])
 
-        cache_file=redis_client.hget(file_hash,"converted_file")
+        cache_file = redis_client.hget(file_hash, "converted_file")
         # print(cache_file)
 
         if cache_file:
             response = Response(cache_file, content_type="application/pdf")
             response.headers["Content-Disposition"] = (
-            'attachment;filename="converted_file.pdf"'
+                'attachment;filename="converted_file.pdf"'
             )
             return response
 
-            user_file = save_to_storage(file_binary)
-            output_path = os.environ.get("STORAGE_PATH")
-            subprocess.run(
-                [
-                    "libreoffice",
-                    "--headless",
-                    "--convert-to",
-                    "pdf",
-                    user_file,
-                    "--outdir",
-                    output_path,
-                ],
-                check=True,
-            )
+        user_file = save_to_storage(file_binary)
+        output_path = os.environ.get("STORAGE_PATH")
+        subprocess.run(
+            [
+                "libreoffice",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                user_file,
+                "--outdir",
+                output_path,
+            ],
+            check=True,
+        )
 
-            file_path = os.path.join(os.environ.get("STORAGE_PATH"),"Userfile.pdf")
+        file_path = os.path.join(os.environ.get("STORAGE_PATH"), "Userfile.pdf")
 
-            result = Save_Cache(file_path,file_hash)
+        result = Save_Cache(file_path, file_hash)
 
-            return result
+        return result
 
     except Exception as e:
         return str(e)
-
